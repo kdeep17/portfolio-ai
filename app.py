@@ -1,5 +1,6 @@
 import streamlit as st
 from engines.risk import run_risk_engine
+from engines.valuation import run_valuation_engine
 from core.parser import load_and_validate_holdings, enrich_portfolio_metrics
 
 st.set_page_config(page_title="Portfolio AI", layout="wide")
@@ -16,6 +17,7 @@ if uploaded_file:
         df, total_value = enrich_portfolio_metrics(df)
         st.metric("Total Portfolio Value", f"₹ {total_value:,.0f}")
         st.subheader("Normalized Holdings")
+        st.success("Holdings file validated successfully")
 
         risk_output = run_risk_engine(df)
 
@@ -37,7 +39,28 @@ if uploaded_file:
         st.subheader("Holding Risk Contribution")
         st.json(risk_output["holding_risk"])
 
-        st.success("Holdings file validated successfully")
+
+        valuation_output = run_valuation_engine(df)
+
+        st.divider()
+        st.subheader("📐 Valuation Diagnostics")
+
+        if not valuation_output:
+            st.info("No valuation data available.")
+        else:
+            for symbol, v in valuation_output.items():
+                with st.expander(symbol):
+                    if v["valuation_status"] in ("Not Applicable", "Insufficient data"):
+                        st.info(f"Valuation status: {v['valuation_status']}")
+                    else:
+                        st.write({
+                            "Trailing P/E": v["trailing_pe"],
+                            "Sector": v["sector"],
+                            "Sector Median P/E": v["sector_median_pe"],
+                            "Valuation Status": v["valuation_status"],
+                            "Stress Score": v["stress_score"]
+                        })
+
 
         st.dataframe(df)
 
