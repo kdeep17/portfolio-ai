@@ -1,18 +1,25 @@
-from core import schema
 import streamlit as st
+from core.parser import load_and_validate_holdings, enrich_portfolio_metrics
 
-st.set_page_config(
-    page_title="Portfolio AI",
-    layout="wide"
+st.set_page_config(page_title="Portfolio AI", layout="wide")
+st.title("📊 Portfolio AI")
+
+uploaded_file = st.file_uploader(
+    "Upload Zerodha holdings.csv",
+    type=["csv"]
 )
 
-st.title("📊 Portfolio AI Dashboard")
+if uploaded_file:
+    try:
+        df = load_and_validate_holdings(uploaded_file)
+        df, total_value = enrich_portfolio_metrics(df)
 
-st.markdown("""
-This system analyzes your equity portfolio and provides
-**risk-aware, thesis-driven decision support**.
+        st.success("Holdings file validated successfully")
 
-> Manual trigger. No auto-trading. No noise.
-""")
+        st.metric("Total Portfolio Value", f"₹ {total_value:,.0f}")
 
-st.success("System environment loaded successfully.")
+        st.subheader("Normalized Holdings")
+        st.dataframe(df)
+
+    except Exception as e:
+        st.error(str(e))
