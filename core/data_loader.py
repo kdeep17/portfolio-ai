@@ -1,12 +1,14 @@
 import yfinance as yf
 import pandas as pd
 from core.schema import MarketData
-from utils.constants import SECTOR_CAPTAINS
+# UPDATED IMPORT: Added suffix constants to filter them out
+from utils.constants import SECTOR_CAPTAINS, NON_EQUITY_SUFFIXES, NON_EQUITY_SERIES
 
 def fetch_market_data(user_symbols: list[str]) -> MarketData:
     """
-    Robust Data Loader [v3.1]
-    Restores fetching of critical fundamental data (PE, ROE) required by engines.
+    Robust Data Loader [v3.2]
+    - Restores fetching of critical fundamental data (PE, ROE).
+    - Filters out SGBs (-GB) and Restricted (-BE) stocks to prevent 404 errors.
     """
     
     # 1. Prepare Symbols
@@ -21,6 +23,12 @@ def fetch_market_data(user_symbols: list[str]) -> MarketData:
     api_tickers_list = []
     
     for sym in unique_symbols:
+        # --- NEW FILTERING LOGIC ---
+        # Skip Sovereign Gold Bonds (-GB) and Restricted Series (-BE)
+        if sym.endswith(NON_EQUITY_SUFFIXES) or sym.endswith(NON_EQUITY_SERIES):
+            continue
+        # ---------------------------
+
         api_sym = sym if sym.endswith(".NS") or sym == "^NSEI" else f"{sym}.NS"
         symbol_map[api_sym] = sym
         api_tickers_list.append(api_sym)
@@ -32,8 +40,11 @@ def fetch_market_data(user_symbols: list[str]) -> MarketData:
 
     # Initialize Container
     data = MarketData()
-    print(f"🔌 Connecting for {len(api_tickers_list)} symbols...")
+    print(f"🔌 Connecting for {len(api_tickers_list)} symbols (Excluded SGB/BE)...")
     
+    if not api_tickers_list:
+        return data
+
     tickers = yf.Tickers(" ".join(api_tickers_list))
 
     # --- 2. BULK HISTORY FETCH (Risk Engine Data) ---
@@ -70,10 +81,9 @@ def fetch_market_data(user_symbols: list[str]) -> MarketData:
             ticker = tickers.tickers[api_sym]
             
             # A. METADATA (CRITICAL RESTORATION)
-            # We MUST fetch .info to get trailingPE, beta, returnOnEquity
             try:
                 full_info = ticker.info
-                # Fallback to fast_info for live price if info fails
+                # Fallback to fast_info if info fails (common YF bug)
                 if not full_info:
                     fi = ticker.fast_info
                     full_info = {
@@ -85,8 +95,7 @@ def fetch_market_data(user_symbols: list[str]) -> MarketData:
             except Exception:
                 data.info[internal_sym] = {}
 
-            # B. FINANCIALS (Thesis Engine)
-            # Fetching individually is safer for stability
+            # B. FINANCIALS
             try:
                 data.financials[internal_sym] = ticker.financials
             except:

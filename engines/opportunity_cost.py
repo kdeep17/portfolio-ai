@@ -3,24 +3,70 @@ import numpy as np
 from utils.constants import SECTOR_MAP, SECTOR_CAPTAINS
 
 # --- CONFIGURATION ---
-# Weights for Capital Drag Calculation
-W_THESIS = 0.45      # Fundamental breakdown is the biggest red flag
-W_MOMENTUM = 0.20    # "Don't catch a falling knife"
-W_VALUATION = 0.20   # "Don't overpay"
-W_RISK = 0.15        # "Don't bet the house"
+W_THESIS = 0.45      
+W_MOMENTUM = 0.20    
+W_VALUATION = 0.20   
+W_RISK = 0.15        
 
 THESIS_PENALTY = {"Intact": 0, "Weakening": 40, "Broken": 100}
 
-# The "Switch Hurdle": A candidate must be X% better to justify tax/slippage costs
-SWITCH_HURDLE_PCT = 1.15  # Candidate must offer 15% better metrics to trigger a switch
+# LOWERED THRESHOLD: Make it easier to suggest swaps (10% improvement is enough)
+SWITCH_HURDLE_PCT = 1.10
+
+def map_yahoo_to_internal(yahoo_info: dict) -> str:
+    """
+    Intelligent mapping that uses Industry specificity to find the best peer.
+    """
+    sector = yahoo_info.get("sector", "")
+    industry = yahoo_info.get("industry", "")
+    
+    # --- LEVEL 1: KEYWORD SCALPEL (High Specificity) ---
+    if "Aerospace" in industry or "Defense" in industry: return "Defence"
+    if "Marine" in industry or "Transport" in industry or "Logistics" in industry: return "Services"
+    if "Construction" in industry or "Engineering" in industry: return "Infrastructure"
+    if "Machinery" in industry or "Electrical Equipment" in industry or "Tools" in industry: return "Capital Goods"
+    
+    if "Hotel" in industry or "Resort" in industry or "Lodging" in industry: return "Hotels"
+    if "Retail" in industry or "Apparel" in industry or "Luxury" in industry or "Department" in industry: return "Retail"
+    if "Auto Parts" in industry: return "Auto Components"
+    if any(x in industry for x in ["Auto", "Truck", "Vehicle"]): return "Auto"
+    if "Electronics" in industry or "Components" in industry or "Appliances" in industry: return "Consumer Durables"
+
+    if "Bank" in industry or "Credit" in industry or "Asset" in industry or "Insurance" in industry: return "Financials"
+
+    if "Software" in industry or "Information" in industry or "Data" in industry or "Semiconductor" in industry: return "IT"
+    if "Telecom" in industry: return "Telecom"
+
+    if any(x in industry for x in ["Drug", "Biotech", "Health", "Pharma"]): return "Healthcare"
+    if any(x in industry for x in ["Steel", "Copper", "Aluminum", "Metal", "Mining"]): return "Metals"
+    if "Chemical" in industry: return "Chemicals"
+    if "Building" in industry or "Cement" in industry: return "Materials"
+
+    if "Oil" in industry or "Gas" in industry or "Coal" in industry: return "Energy"
+    if "Utilities" in sector or "Power" in industry: return "Power"
+
+    # --- LEVEL 2: BROAD SECTOR BACKSTOP ---
+    if sector == "Financial Services": return "Financials"
+    if sector == "Technology": return "IT"
+    if sector == "Healthcare": return "Healthcare"
+    if sector == "Energy": return "Energy"
+    if sector == "Utilities": return "Power"
+    if sector == "Consumer Defensive": return "FMCG"
+    if sector == "Basic Materials": return "Metals" 
+    if sector == "Real Estate": return "Realty"
+
+    # --- LEVEL 3: INTELLIGENT FALLBACKS ---
+    if sector == "Consumer Cyclical": return "Universal"
+    if sector == "Industrials": return "Universal"
+
+    return "Universal"
 
 def get_momentum_score(price_history) -> float:
     """
     Calculates a 0-100 Momentum Score based on technical structure.
-    0 = Crash Mode (Below all MAs), 100 = Bull Run (Above 200DMA).
     """
     if price_history is None or price_history.empty or len(price_history) < 200:
-        return 50.0  # Neutral if no data
+        return 50.0
 
     try:
         closes = price_history['Close']
@@ -29,24 +75,20 @@ def get_momentum_score(price_history) -> float:
         ma_200 = closes.rolling(window=200).mean().iloc[-1]
         
         score = 50.0
-        
-        # Long-term Trend (weight: 30)
         if current > ma_200: score += 15
         else: score -= 15
-        
-        # Medium-term Trend (weight: 20)
         if current > ma_50: score += 10
         else: score -= 10
-        
-        # Momentum Acceleration (weight: 10)
-        if ma_50 > ma_200: score += 5  # Golden Cross territory
+        if ma_50 > ma_200: score += 5 
         
         return max(0.0, min(100.0, score))
-        
     except Exception:
         return 50.0
 
-def evaluate_premium_switch(holding_sym: str, candidate_sym: str, market_data, holding_risk: dict):
+def evaluate_premium_switch(holding_sym: str, candidate_sym: str, market_data, holding_risk: dict, is_emergency: bool = False):
+    """
+    Generates 'Advisory Grade' rationales for switching stocks.
+    """
     # 1. Get Data
     h_info = market_data.info.get(holding_sym, {})
     c_info = market_data.info.get(candidate_sym, {})
@@ -54,74 +96,79 @@ def evaluate_premium_switch(holding_sym: str, candidate_sym: str, market_data, h
     
     if not c_info or not h_info: return None
 
-    # 2. Extract Metrics (THE FIX: Use 'or' to fallback if None)
-    h_pe = h_info.get("trailingPE") or 100.0  # Assume expensive if missing
-    c_pe = c_info.get("trailingPE") or 100.0
+    # 2. Extract Metrics (With Safety Defaults)
+    h_roe = h_info.get("returnOnEquity") or 0.10
+    c_roe = c_info.get("returnOnEquity") or 0.10
     
-    h_roe = h_info.get("returnOnEquity") or 0.0
-    c_roe = c_info.get("returnOnEquity") or 0.0
+    h_pe = h_info.get("trailingPE") or 100.0
+    c_pe = c_info.get("trailingPE") or 100.0
     
     h_peg = h_info.get("pegRatio") or 5.0
     c_peg = c_info.get("pegRatio") or 5.0
-    
-    # 3. Filter 1: The "Quality" Hurdle (ROE)
-    # Candidate must have Better ROE OR similar ROE with much lower Beta
+
+    # 3. EMERGENCY MODE (Broken Stock)
+    if is_emergency:
+        # If the holding is broken, we just need a stable ship (ROE > 12%).
+        if c_roe > 0.12:
+             return (f"🛡️ **Safety Switch**: {holding_sym} fundamentals are broken. Switch to **{candidate_sym}** "
+                     f"to preserve capital in a sector leader (ROE {round(c_roe*100,1)}%).")
+
+    # 4. Standard "Premium Upgrade" Logic
     quality_pass = False
     
-    # If Candidate ROE is > 15% higher than Holding (The Switch Cost Hurdle)
+    # Check A: ROE Upgrade
     if c_roe > (h_roe * SWITCH_HURDLE_PCT):
         quality_pass = True
         
-    if not quality_pass: return None # Fail fast
+    # Check B: Momentum Upgrade (Stop catching falling knives)
+    c_mom = get_momentum_score(c_hist)
+    h_mom = get_momentum_score(market_data.price_history.get(holding_sym))
+    
+    if h_mom < 30 and c_mom > 60: # Holding crashing, Candidate flying
+        quality_pass = True
+        
+    if not quality_pass: return None 
 
-    # 4. Filter 2: The "Value" Check (PE / PEG)
-    # Don't switch into an overvalued bubble
+    # 5. Value Check
     value_pass = False
-    if c_pe < h_pe: # Cheaper is good
-        value_pass = True
-    elif c_peg < 1.5: # If expensive, growth must justify it
-        value_pass = True
+    if c_pe < h_pe: value_pass = True
+    elif c_peg < 1.5: value_pass = True
+    elif is_emergency: value_pass = True
         
     if not value_pass: return None
     
-    # 5. Filter 3: The "Trend" Safety (Momentum)
-    # Ensure we aren't suggesting a "Value Trap" (falling stock)
-    c_mom_score = get_momentum_score(c_hist)
-    if c_mom_score < 40: # Stock is in a downtrend
-        return None 
+    # 6. Momentum Check (Safety)
+    if c_mom < 40: return None 
 
-    # 6. Construct The Verdict
-    # If we reached here, it's a valid switch. Now we format the "Why".
+    # 7. THE VERDICT (Premium Strings)
     
-    # Scenario A: Growth at a Reasonable Price (GARP) Upgrade
+    # Scenario A: GARP (Growth at Reasonable Price)
     if c_peg < h_peg and c_roe > h_roe:
-        return (f"GARP Upgrade: {candidate_sym} offers higher capital efficiency "
-                f"(ROE {round(c_roe*100,1)}%) and faster growth (PEG {c_peg}) "
-                f"compared to your holding.")
+        return (f"💎 **Strategic Upgrade**: **{candidate_sym}** is a superior compounder. "
+                f"It offers higher capital efficiency (ROE {round(c_roe*100,1)}%) "
+                f"at a better growth-adjusted price (PEG {c_peg}) than {holding_sym}.")
 
-    # Scenario B: Deep Value Switch
-    if c_pe < (h_pe * 0.7):
-        return (f"Valuation Arbitrage: {candidate_sym} trades at a 30%+ discount "
-                f"(PE {round(c_pe,1)} vs {round(h_pe,1)}) while maintaining superior quality.")
+    # Scenario B: Deep Value
+    if c_pe < (h_pe * 0.8):
+        return (f"💰 **Valuation Arbitrage**: You are overpaying for {holding_sym} (PE {round(h_pe,1)}). "
+                f"Switch to **{candidate_sym}** (PE {round(c_pe,1)}) to own similar quality at a 20%+ discount.")
+                
+    # Scenario C: Momentum Flip
+    if h_mom < 30 and c_mom > 60:
+         return (f"🚀 **Momentum Flip**: {holding_sym} is in a confirmed downtrend. "
+                 f"Capital is rotating into **{candidate_sym}**, which shows strong institutional accumulation.")
 
-    return (f"Quality Upgrade: {candidate_sym} is a sector leader with superior "
-            f"fundamentals (ROE {round(c_roe*100,1)}%) and positive momentum.")
+    return (f"✅ **Quality Upgrade**: {candidate_sym} is the sector leader with superior fundamentals (ROE {round(c_roe*100,1)}%).")
 
 
 def run_opportunity_cost_engine(df, risk_data, valuation_data, thesis_data, market_data):
-    """
-    Identifies 'Dead Capital' using a Multi-Factor Capital Drag Model.
-    Suggests swaps only if the 'Hurdle Rate' is met.
-    """
     results = {}
 
     for _, row in df.iterrows():
         symbol = row["symbol"]
-        
-        if row.get("instrument_type", "Equity") != "Equity":
-            continue
+        if row.get("instrument_type", "Equity") != "Equity": continue
 
-        # 1. Gather Inputs
+        # Gather Inputs
         thesis = thesis_data.get(symbol, {})
         val = valuation_data.get(symbol, {})
         risk = risk_data["holding_risk"].get(symbol, {})
@@ -131,19 +178,14 @@ def run_opportunity_cost_engine(df, risk_data, valuation_data, thesis_data, mark
         val_stress = val.get("stress_score", 50)
         risk_score = risk.get("risk_contribution_score", 0)
         
-        # 2. Compute "Momentum Drag" (New Factor)
-        # If stock is crashing (Momentum < 30), Drag increases significantly
         mom_score = get_momentum_score(price_hist)
-        mom_drag = 100.0 - mom_score # Low momentum = High drag
+        mom_drag = 100.0 - mom_score 
 
-        # 3. Compute Total "Capital Drag Score"
+        # Compute Drag Score
         if thesis_status == "Broken":
             drag_score = 100.0
         else:
-            # Normalize inputs to 0-100 scale
             risk_norm = min(risk_score * 5, 100)
-            
-            # Weighted Multi-Factor Model
             drag_score = (
                 (THESIS_PENALTY.get(thesis_status, 0) * W_THESIS) +
                 (val_stress * W_VALUATION) +
@@ -152,44 +194,43 @@ def run_opportunity_cost_engine(df, risk_data, valuation_data, thesis_data, mark
             )
             drag_score = round(min(drag_score, 100), 1)
 
-        # 4. Determine Action Bucket
-        if drag_score >= 85:
-            bucket = "Replace"   # Critical inefficiency
-        elif drag_score >= 60:
-            bucket = "Monitor"   # Underperformance warning
-        else:
-            bucket = "Defend"    # Efficient capital
+        # UPDATED THRESHOLDS [Lowered to catch more opportunities]
+        if drag_score >= 80: bucket = "Replace"
+        elif drag_score >= 50: bucket = "Monitor" 
+        else: bucket = "Defend"
 
-        # 5. Find Replacement Candidates (The "Alpha Search")
         replacement_candidates = None
         
         if bucket in ["Replace", "Monitor"]:
             sector = SECTOR_MAP.get(symbol, "Unknown")
-            potential_candidates = SECTOR_CAPTAINS.get(sector, [])
+            if sector == "Unknown":
+                y_info = market_data.info.get(symbol, {})
+                sector = map_yahoo_to_internal(y_info)
             
+            potential_candidates = SECTOR_CAPTAINS.get(sector, [])
+            if not potential_candidates:
+                 potential_candidates = SECTOR_CAPTAINS.get("Universal", ["NIFTYBEES.NS"])
+
             valid_switches = []
             
+            # Pass 'is_emergency' flag if bucket is Replace
+            is_emergency = (bucket == "Replace")
+            
             for candidate in potential_candidates:
-                # Avoid self-reference
-                if candidate == symbol or candidate in df["symbol"].values:
-                    continue
+                if candidate == symbol or candidate in df["symbol"].values: continue
                 
-                # Run the Premium Filter
                 rationale = evaluate_premium_switch(
-                    symbol, candidate, market_data, risk
+                    symbol, candidate, market_data, risk, is_emergency=is_emergency
                 )
                 
                 if rationale:
-                    valid_switches.append({
-                        "symbol": candidate,
-                        "note": rationale
-                    })
+                    valid_switches.append({"symbol": candidate, "note": rationale})
 
             if valid_switches:
                 replacement_candidates = {
                     "sector": sector,
-                    "candidates": valid_switches[:2], # Strict curation (Top 2 only)
-                    "disclaimer": "Switch suggestions incorporate 'Hurdle Rate' logic (Cost of switching)."
+                    "candidates": valid_switches[:2],
+                    "disclaimer": "Switch suggestions based on relative efficiency."
                 }
 
         results[symbol] = {

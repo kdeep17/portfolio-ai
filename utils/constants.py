@@ -29,14 +29,40 @@ def classify_instrument(symbol: str) -> str:
 # utils/constants.py
 
 # Live benchmarks: We fetch these to gauge "Sector Sentiment"
+# UPDATED: Aligned with SECTOR_MAP keys and expanded for granularity
 SECTOR_CAPTAINS = {
-    "Financials": ["HDFCBANK.NS", "ICICIBANK.NS"], # The heavyweights
-    "IT": ["TCS.NS", "INFY.NS"],                   # The standard bearers
-    "FMCG": ["HINDUNILVR.NS"],                     # The defensive anchor
-    "Auto": ["MARUTI.NS"],                         # The cyclical leader
-    "Energy": ["RELIANCE.NS"],                     # The conglomerate proxy
-    "Defence": ["HAL.NS"],
-    "Power": ["NTPC.NS"]
+    # --- CORE ---
+    "Financials": ["HDFCBANK.NS", "ICICIBANK.NS", "BAJFINANCE.NS"],
+    "IT": ["TCS.NS", "INFY.NS"],
+    "FMCG": ["HINDUNILVR.NS", "ITC.NS", "NESTLEIND.NS"],
+    "Auto": ["MARUTI.NS", "M&M.NS", "TMCV.NS"],
+    "Energy": ["RELIANCE.NS", "ONGC.NS", "COALINDIA.NS"],
+    "Power": ["NTPC.NS", "POWERGRID.NS", "TATAPOWER.NS"],
+    
+    # --- INDUSTRIALS & INFRA ---
+    "Defence": ["HAL.NS", "BEL.NS", "MAZDOCK.NS"],
+    "Capital Goods": ["SIEMENS.NS", "ABB.NS", "CUMMINSIND.NS"], # Engineering/Machinery
+    "Infrastructure": ["LT.NS", "ADANIENT.NS"],
+    "Services": ["ADANIPORTS.NS", "INDIGO.NS"], # Logistics/Transport
+    
+    # --- CONSUMER & RETAIL ---
+    "Retail": ["TRENT.NS", "TITAN.NS", "DMART.NS"],
+    "Hotels": ["INDHOTEL.NS", "EIHOTEL.NS"],
+    "Consumer Durables": ["HAVELLS.NS", "VOLTAS.NS", "DIXON.NS"], # Electronics/Appliances
+    "Auto Components": ["MOTHERSON.NS", "BOSCHLTD.NS"],
+
+    # --- MATERIALS & HEALTH ---
+    "Healthcare": ["SUNPHARMA.NS", "DIVISLAB.NS", "APOLLOHOSP.NS"],
+    "Metals": ["TATASTEEL.NS", "HINDALCO.NS", "JSWSTEEL.NS"],
+    "Chemicals": ["PIDILITIND.NS", "SRF.NS"],
+    "Materials": ["ULTRACEMCO.NS", "AMBUJACEM.NS"], # Cement/Building Materials
+
+    # --- OTHERS ---
+    "Realty": ["DLF.NS", "GODREJPROP.NS"],
+    "Telecom": ["BHARTIARTL.NS"],
+    
+    # --- FALLBACK ---
+    "Universal": ["NIFTYBEES.NS"]
 }
 
 # Fallback values (Safety net only)
@@ -45,8 +71,12 @@ FALLBACK_SECTOR_PE = {
     "IT": 26.0, 
     "FMCG": 55.0, 
     "Auto": 24.0, 
-    "Energy": 20.0, 
-    "Defence": 35.0,
+    "Energy": 15.0, 
+    "Defence": 40.0,
+    "Capital Goods": 45.0,
+    "Retail": 60.0,
+    "Consumer Durables": 50.0,
+    "Healthcare": 30.0,
     "Unknown": 20.0
 }
 
@@ -69,7 +99,7 @@ SECTOR_MAP = {
     "KPITTECH": "IT",
     "MPHASIS": "IT",
     "NETWEB": "IT",
-    "OPTIEMUS": "IT",  # Electronics / Hardware
+    "OPTIEMUS": "IT",  # Electronics / Hardware -> Could map to Durables, but IT is safe
     "PERSISTENT": "IT",
     "RAILTEL": "Telecom",
     "STLTECH": "Telecom",
