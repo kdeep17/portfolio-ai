@@ -16,81 +16,142 @@ ZERODHA_COLUMN_MAP = {
 
 REQUIRED_ZERODHA_COLUMNS = set(ZERODHA_COLUMN_MAP.keys())
 
+NON_EQUITY_SUFFIXES = ("-GB",)     # Sovereign Gold Bonds
+NON_EQUITY_SERIES = ("-BE",)       # BE category stocks
+
+def classify_instrument(symbol: str) -> str:
+    if symbol.endswith(NON_EQUITY_SUFFIXES):
+        return "SGB"
+    if symbol.endswith(NON_EQUITY_SERIES):
+        return "Restricted Equity"
+    return "Equity"
+
+# utils/constants.py
+
+# Live benchmarks: We fetch these to gauge "Sector Sentiment"
+SECTOR_CAPTAINS = {
+    "Financials": ["HDFCBANK.NS", "ICICIBANK.NS"], # The heavyweights
+    "IT": ["TCS.NS", "INFY.NS"],                   # The standard bearers
+    "FMCG": ["HINDUNILVR.NS"],                     # The defensive anchor
+    "Auto": ["MARUTI.NS"],                         # The cyclical leader
+    "Energy": ["RELIANCE.NS"],                     # The conglomerate proxy
+    "Defence": ["HAL.NS"],
+    "Power": ["NTPC.NS"]
+}
+
+# Fallback values (Safety net only)
+FALLBACK_SECTOR_PE = {
+    "Financials": 18.0, 
+    "IT": 26.0, 
+    "FMCG": 55.0, 
+    "Auto": 24.0, 
+    "Energy": 20.0, 
+    "Defence": 35.0,
+    "Unknown": 20.0
+}
+
 SECTOR_MAP = {
+    # Financials
     "360ONE": "Financials",
     "ABCAPITAL": "Financials",
-    "ADANIENT": "Services",
-    "ADANIPORTS": "Services",
-    "ANANTRAJ": "Realty",
-    "ATL": "Energy",
-    "AVTNPL": "Consumer Staples",
     "BAJAJHFL": "Financials",
     "BAJFINANCE": "Financials",
-    "CHALET": "Consumer Discretionary",
-    "CHAMBLFERT": "Chemicals",
-    "DEEPAKFERT": "Chemicals",
-    "EIDPARRY": "Consumer Staples",
-    "EPL": "Materials",
-    "ESSARSHPNG-BE": "Services",
-    "GODREJAGRO": "Consumer Staples",
-    "GOLDBEES": "ETF",
-    "GOLDCASE": "ETF",
-    "HAL": "Defence",
     "HDFCBANK": "Financials",
     "HDFCLIFE": "Financials",
-    "HFCL": "Telecommunication",
-    "HINDALCO": "Metals & Mining",
     "IEX": "Financials",
-    "IOC": "Energy",
-    "IRCTC": "Services",
-    "ITC": "Consumer Staples",
-    "JASH": "Capital Goods",
     "JIOFIN": "Financials",
-    "JUBLINGREA": "Chemicals",
     "KOTAKBANK": "Financials",
-    "KPIL": "Capital Goods",
-    "KPITTECH": "IT",
-    "KRBL": "Consumer Staples",
-    "LTFOODS": "Consumer Staples",
-    "LXCHEM": "Chemicals",
-    "MANKIND": "Healthcare",
-    "MMFL": "Auto Components",
-    "MOTHERSON": "Auto Components",
-    "MPHASIS": "IT",
-    "MSUMI": "Auto Components",
-    "NATIONALUM": "Metals & Mining",
-    "NAVKARCORP": "Services",
-    "NETWEB": "IT",
-    "NHPC": "Energy",
-    "NIFTYBEES": "ETF",
-    "OIL": "Energy",
-    "OPTIEMUS": "IT",
-    "ORIENTCEM": "Materials",
-    "PERSISTENT": "IT",
-    "RAILTEL": "Telecommunication",
-    "RANEHOLDIN": "Auto Components",
-    "RAYMOND": "Capital Goods",
-    "RAYMONDLSL": "Consumer Discretionary",
-    "RAYMONDREL": "Realty",
-    "RCF": "Chemicals",
-    "RELIANCE": "Energy",
     "SBICARD": "Financials",
     "SBIN": "Financials",
+
+    # IT / Telecom
+    "HFCL": "Telecom",
+    "KPITTECH": "IT",
+    "MPHASIS": "IT",
+    "NETWEB": "IT",
+    "OPTIEMUS": "IT",  # Electronics / Hardware
+    "PERSISTENT": "IT",
+    "RAILTEL": "Telecom",
+    "STLTECH": "Telecom",
+
+    # Energy / Power / Oil
+    "ATL": "Power",  # Adani Energy Solutions
+    "IOC": "Energy",
+    "NHPC": "Power",
+    "OIL": "Energy",
+    "RELIANCE": "Energy",
+    "TATAPOWER": "Power",
+
+    # Auto Components
+    "MMFL": "Auto Components",
+    "MOTHERSON": "Auto Components",
+    "MSUMI": "Auto Components",
+    "RANEHOLDIN": "Auto Components",
+    "SONACOMS": "Auto Components",
+
+    # FMCG / Consumer Staples
+    "AVTNPL": "FMCG",
+    "EIDPARRY": "FMCG",
+    "GODREJAGRO": "FMCG",
+    "ITC": "FMCG",
+    "KRBL": "FMCG",
+    "LTFOODS": "FMCG",
+    "VBL": "FMCG",
+
+    # Chemicals / Fertilizers
+    "CHAMBLFERT": "Chemicals",
+    "DEEPAKFERT": "Chemicals",
+    "JUBLINGREA": "Chemicals",
+    "LXCHEM": "Chemicals",
+    "RCF": "Chemicals",
+    "SHARDACROP": "Chemicals",
+    "SUMICHEM": "Chemicals",
+
+    # Capital Goods / Defence / Engineering
+    "HAL": "Defence",
+    "JASH": "Capital Goods",
+    "KPIL": "Infrastructure",
+    "RAYMOND": "Capital Goods",  # Core Engineering/Realty entity
+    "SHAKTIPUMP": "Capital Goods",
+    "TITAGARH": "Capital Goods",
+    "WALCHANNAG": "Capital Goods",
+
+    # Consumer Discretionary / Retail
+    "CHALET": "Hotels",
+    "RAYMONDLSL": "Retail",  # Lifestyle/Textiles
+    "TRENT": "Retail",
+
+    # Metals & Mining
+    "HINDALCO": "Metals",
+    "NATIONALUM": "Metals",
+
+    # Materials / Packaging / Cement
+    "EPL": "Materials",
+    "ORIENTCEM": "Materials",
+    "TIMETECHNO": "Materials",
+
+    # Services / Logistics / Ports
+    "ADANIENT": "Services",
+    "ADANIPORTS": "Services",
+    "ESSARSHPNG-BE": "Services",
+    "IRCTC": "Services",
+    "NAVKARCORP": "Services",
+
+    # Realty
+    "ANANTRAJ": "Realty",
+    "RAYMONDREL": "Realty",
+
+    # Healthcare
+    "MANKIND": "Healthcare",
+
+    # ETFs & Sovereign Gold Bonds (Commodities)
+    "GOLDBEES": "ETF",
+    "GOLDCASE": "ETF",
+    "NIFTYBEES": "ETF",
     "SGBJUN31I-GB": "Commodities",
     "SGBMAY29I-GB": "Commodities",
     "SGBMR29XII-GB": "Commodities",
-    "SGBSEP28VI-GB": "Commodities",
-    "SHAKTIPUMP": "Capital Goods",
-    "SHARDACROP": "Chemicals",
-    "SONACOMS": "Auto Components",
-    "STLTECH": "Telecommunication",
-    "SUMICHEM": "Chemicals",
-    "TATAPOWER": "Energy",
-    "TIMETECHNO": "Materials",
-    "TITAGARH": "Capital Goods",
-    "TRENT": "Consumer Discretionary",
-    "VBL": "Consumer Staples",
-    "WALCHANNAG": "Capital Goods"
+    "SGBSEP28VI-GB": "Commodities"
 }
 
 RISK_THRESHOLDS = {

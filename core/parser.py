@@ -1,5 +1,6 @@
 import pandas as pd
 from utils.constants import REQUIRED_ZERODHA_COLUMNS, ZERODHA_COLUMN_MAP
+from utils.constants import classify_instrument
 
 
 class HoldingsParseError(Exception):
@@ -36,6 +37,7 @@ def load_and_validate_holdings(csv_file) -> pd.DataFrame:
 
     # --- Normalize symbol format ---
     df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
+    df["instrument_type"] = df["symbol"].apply(classify_instrument)
 
     return df
 
