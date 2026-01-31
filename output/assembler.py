@@ -3,35 +3,83 @@ import hashlib
 import numpy as np
 import pandas as pd
 
+# --- SCORING WEIGHTS ---
+W_FUNDAMENTAL = 0.40  # Thesis strength is paramount
+W_EFFICIENCY  = 0.30  # Opportunity cost / ROE
+W_VALUATION   = 0.20  # Margin of safety
+W_RISK        = 0.10  # Volatility profile
+
 def _hash_dataframe(df) -> str:
     """Creates a stable fingerprint of holdings for auditability."""
-    csv_bytes = df.to_csv(index=False).encode()
-    return hashlib.sha256(csv_bytes).hexdigest()
+    try:
+        csv_bytes = df.to_csv(index=False).encode()
+        return hashlib.sha256(csv_bytes).hexdigest()
+    except:
+        return "hash_error"
 
 def _sanitize(obj):
     """
-    Recursively converts numpy types to native Python types for JSON serialization.
-    Essential for Streamlit/API compatibility.
-    Updated for NumPy 2.0 compatibility (uses abstract base classes).
+    Recursively converts numpy/pandas types to native Python types.
+    Ensures JSON serializability for the frontend/API.
     """
-    # Check for integer types (covers int8, int16, int32, int64, uint8, etc.)
-    if isinstance(obj, np.integer):
+    if isinstance(obj, (np.integer, int)):
         return int(obj)
-    
-    # Check for floating types (covers float16, float32, float64)
-    elif isinstance(obj, np.floating):
+    elif isinstance(obj, (np.floating, float)):
         return float(obj)
-        
     elif isinstance(obj, (np.ndarray,)):
         return obj.tolist()
-        
+    elif isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
     elif isinstance(obj, dict):
         return {k: _sanitize(v) for k, v in obj.items()}
-        
     elif isinstance(obj, list):
         return [_sanitize(v) for v in obj]
+    elif obj is None:
+        return None
+    return str(obj)
+
+def calculate_premium_health_score(df, thesis_data, opportunity_data, valuation_data):
+    """
+    Computes a sophisticated 'Portfolio Quality Score' (0-100).
+    """
+    total_score = 0.0
+    total_weight = 0.0
+
+    for _, row in df.iterrows():
+        sym = row.get("symbol")
+        if row.get("instrument_type") != "Equity":
+            continue
+            
+        w = row.get("weight_pct", 0)
         
-    return obj
+        # 1. Fundamental Score (Thesis)
+        # Intact=100, Weakening=50, Broken=0
+        t_status = thesis_data.get(sym, {}).get("status", "Unknown")
+        score_fund = 100 if t_status == "Intact" else (50 if t_status == "Weakening" else 0)
+
+        # 2. Efficiency Score (Opportunity Cost)
+        # Derived from Capital Drag (Lower drag = Higher efficiency)
+        drag = opportunity_data.get(sym, {}).get("capital_drag_score", 50)
+        score_eff = max(0, 100 - drag)
+
+        # 3. Valuation Score
+        # Derived from Stress Score (Lower stress = Higher comfort)
+        stress = valuation_data.get(sym, {}).get("stress_score", 50)
+        score_val = max(0, 100 - stress)
+
+        # 4. Composite Holding Score
+        holding_score = (
+            (score_fund * W_FUNDAMENTAL) + 
+            (score_eff * W_EFFICIENCY) + 
+            (score_val * W_VALUATION) + 
+            (50 * W_RISK) # Risk is neutral at holding level, managed at portfolio level
+        )
+        
+        total_score += (holding_score * w)
+        total_weight += w
+
+    if total_weight == 0: return 0
+    return int(round(total_score / total_weight))
 
 def assemble_output(
     df,
@@ -44,144 +92,122 @@ def assemble_output(
     event_data=None
 ) -> dict:
     """
-    Assembles the 'Source of Truth' response object.
-    Aggregates disparate engine signals into a cohesive narrative.
+    Assembles the 'Single Source of Truth' for the advisory interface.
     """
 
     # =========================
-    # 1. RUN METADATA
+    # 1. METADATA & SCORING
     # =========================
     run_id = datetime.utcnow().isoformat()
+    health_score = calculate_premium_health_score(df, thesis_data, opportunity_data, valuation_data)
 
     # =========================
-    # 2. PORTFOLIO SCORING
-    # =========================
-    # Calculate a weighted "Health Score" for the portfolio
-    total_weighted_score = 0.0
-    total_weight = 0.0
-    
-    for _, row in df.iterrows():
-        sym = row.get("symbol")
-        if row.get("instrument_type") == "Equity":
-            w = row.get("weight_pct", 0)
-            
-            # 100 - Opportunity Cost Score = Efficiency Score
-            # (If Op Cost is 0, Efficiency is 100. If Op Cost is 100, Efficiency is 0)
-            op_data = opportunity_data.get(sym, {})
-            drag = op_data.get("capital_drag_score", 50) 
-            efficiency = 100 - drag
-            
-            total_weighted_score += (efficiency * w)
-            total_weight += w
-            
-    portfolio_health_score = round(total_weighted_score / total_weight) if total_weight > 0 else 0
-
-    # =========================
-    # 3. EXECUTIVE SUMMARY
+    # 2. EXECUTIVE SUMMARY (RISK AWARE)
     # =========================
     try:
-        risk_metrics = risk_data.get("portfolio_metrics", {})
-        sector_info = risk_data.get("sector_exposure", {})
+        r_metrics = risk_data.get("portfolio_metrics", {})
+        conc = risk_data.get("concentration", {})
         
-        # Count Actions
+        # Calculate Cash Position
+        equity_weight = df[df["instrument_type"] == "Equity"]["weight_pct"].sum()
+        cash_pct = max(0.0, 100.0 - equity_weight)
+        
+        # Action Counts
         actions = decision_data.get("portfolio_actions", {}).get("actions", [])
-        action_counts = {"EXIT": 0, "TRIM": 0, "REPLACE": 0, "HOLD": 0}
+        action_counts = {"EXIT": 0, "TRIM": 0, "REPLACE": 0}
         for a in actions:
-            action_counts[a["action"]] = action_counts.get(a["action"], 0) + 1
+            if a["action"] in action_counts:
+                action_counts[a["action"]] += 1
 
         portfolio_summary = {
             "total_value": total_value,
-            "net_worth_health_score": portfolio_health_score,
-            "number_of_holdings": int(len(df[df["instrument_type"] == "Equity"])),
+            "health_score": health_score,
+            "holdings_count": len(df),
+            
+            # The "Risk Dashboard"
             "risk_profile": {
-                "beta": risk_metrics.get("portfolio_beta"),
-                "label": risk_metrics.get("risk_profile"),
-                "cash_drag_pct": round(100.0 - total_weight, 2) # Remaining weight is cash
+                "label": r_metrics.get("risk_profile", "Unknown"),
+                "beta": r_metrics.get("portfolio_beta", 1.0),
+                "daily_var_95_amt": r_metrics.get("daily_var_95", 0), # Value at Risk
+                "cash_position_pct": round(cash_pct, 1)
             },
-            "top_sector": next(iter(sector_info.get("weights", {}))) if sector_info.get("weights") else "N/A",
-            "action_summary": f"{len(actions)} Actions Suggested ({action_counts['EXIT']} Exit, {action_counts['REPLACE']} Replace)",
-            "critical_flags": (
-                risk_data.get("concentration", {}).get("flags", []) + 
-                risk_data.get("sector_exposure", {}).get("flags", [])
-            )
+            
+            # The "Action Plan"
+            "advisory_summary": {
+                "total_actions": len(actions),
+                "critical_actions": action_counts["EXIT"] + action_counts["REPLACE"],
+                "breakdown": action_counts
+            },
+            
+            # Alerts
+            "critical_flags": conc.get("flags", []) + risk_data.get("sector_exposure", {}).get("flags", [])
         }
     except Exception as e:
-        print(f"Summary Assembly Error: {e}")
-        portfolio_summary = {"error": str(e)}
+        print(f"Assembly Error (Summary): {e}")
+        portfolio_summary = {"error": "Failed to generate summary"}
 
     # =========================
-    # 4. DETAILED HOLDINGS ANALYSIS
+    # 3. DETAILED HOLDINGS ANALYSIS
     # =========================
     holdings_analysis = []
 
     for _, row in df.iterrows():
-        symbol = row.get("symbol")
-        if row.get("instrument_type") != "Equity":
-            continue
-
+        sym = row.get("symbol")
+        
+        # Support Non-Equity (SGB, ETFs) gently
+        is_equity = row.get("instrument_type") == "Equity"
+        
         try:
-            # Null-safe extraction
-            thesis = thesis_data.get(symbol) or {}
-            val = valuation_data.get(symbol) or {}
-            opp = opportunity_data.get(symbol) or {}
-            risk = risk_data.get("holding_risk", {}).get(symbol) or {}
-            decision = decision_data.get("holding_actions", {}).get(symbol) or {}
+            # Null-Safe Extractors
+            t_dat = thesis_data.get(sym, {})
+            v_dat = valuation_data.get(sym, {})
+            o_dat = opportunity_data.get(sym, {})
+            r_dat = risk_data.get("holding_risk", {}).get(sym, {})
+            d_dat = decision_data.get("holding_actions", {}).get(sym, {})
 
             holding_block = {
-                "symbol": symbol,
+                "symbol": sym,
+                "type": row.get("instrument_type"),
                 "meta": {
-                    "sector": thesis.get("sector", "Unknown"),
-                    "weight_pct": round(row.get("weight_pct", 0.0), 2),
-                    "current_price": row.get("ltp", 0.0)
+                    "sector": t_dat.get("sector", "N/A"),
+                    "weight_pct": round(row.get("weight_pct", 0), 2),
+                    "current_price": row.get("ltp", 0),
+                    "invested_val": row.get("current_value", 0)
                 },
-                "fundamental_health": {
-                    "status": thesis.get("status", "Unknown"),
-                    "drivers": thesis.get("drivers", [])
+                # Only populate deep analytics for Equity
+                "analytics": {
+                    "thesis_status": t_dat.get("status", "N/A") if is_equity else "N/A",
+                    "valuation_rating": v_dat.get("valuation_status", "N/A") if is_equity else "N/A",
+                    "momentum_score": o_dat.get("momentum_health", 50) if is_equity else 0,
+                    "risk_beta": r_dat.get("beta", 0) if is_equity else 0,
+                    "var_contribution": r_dat.get("var_95_amt", 0)
                 },
-                "valuation": {
-                    "rating": val.get("valuation_status", "Unknown"),
-                    "score": val.get("stress_score", 0),
-                    "context": val.get("reason", ""),
-                    "benchmark": f"{val.get('primary_metric')} vs {val.get('benchmark_source')}"
-                },
-                "risk_profile": {
-                    "contribution": risk.get("risk_contribution_score", 0),
-                    "beta": risk.get("beta", 1.0),
-                    "liquidity": risk.get("size_category", "Unknown"),
-                    "tag": risk.get("risk_tag", "Low")
-                },
-                "efficiency": {
-                    "capital_drag": opp.get("capital_drag_score", 0),
-                    "action_bucket": opp.get("bucket", "Hold"),
-                    "better_alternatives": opp.get("replacement_candidates")
-                },
-                "final_verdict": {
-                    "action": decision.get("action", "HOLD"),
-                    "rationale": decision.get("reason", ""),
-                    "urgency": decision.get("urgency", "Low")
+                "advisory": {
+                    "action": d_dat.get("action", "HOLD"),
+                    "rationale": d_dat.get("reason", ""),
+                    "urgency": d_dat.get("urgency", "Low"),
+                    "alternatives": o_dat.get("replacement_candidates")
                 }
             }
-
             holdings_analysis.append(holding_block)
 
         except Exception as e:
-            print(f"Skipping {symbol} due to assembly error: {e}")
+            print(f"Skipping {sym}: {e}")
             continue
 
     # =========================
-    # 5. FINAL PACKAGING (Sanitized)
+    # 4. FINAL PACKAGE
     # =========================
-    raw_output = {
-        "run_metadata": {
+    output = {
+        "metadata": {
             "run_id": run_id,
-            "data_hash": _hash_dataframe(df),
-            "generated_at_utc": run_id,
-            "engine_version": "2.1 (NumPy 2.0 Compatible)"
+            "version": "Premium v2.0",
+            "data_hash": _hash_dataframe(df)
         },
-        "portfolio_summary": portfolio_summary,
-        "strategic_actions": decision_data.get("portfolio_actions", {}).get("actions", []),
-        "holdings_analysis": holdings_analysis,
-        "market_intelligence": event_data or []
+        "summary": portfolio_summary,
+        "actions": decision_data.get("portfolio_actions", {}).get("actions", []),
+        "holdings": holdings_analysis,
+        "intelligence": event_data or []
     }
 
-    return _sanitize(raw_output)
+    return _sanitize(output)

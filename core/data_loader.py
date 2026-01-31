@@ -1,75 +1,109 @@
 import yfinance as yf
+import pandas as pd
 from core.schema import MarketData
 from utils.constants import SECTOR_CAPTAINS
 
 def fetch_market_data(user_symbols: list[str]) -> MarketData:
     """
-    Fetches all required data for the portfolio + sector captains in ONE batch request.
-    Handles symbol normalization (.NS suffix) ensuring robust mapping.
+    Robust Data Loader [v3.1]
+    Restores fetching of critical fundamental data (PE, ROE) required by engines.
     """
     
-    # 1. Gather Sector Captains (avoid duplicates)
+    # 1. Prepare Symbols
     captain_symbols = set()
     for captains in SECTOR_CAPTAINS.values():
         captain_symbols.update(captains)
         
-    # 2. Merge with User Symbols
-    # We use a set to ensure uniqueness across both lists
-    # Clean inputs: Strip whitespace and upper case
-    unique_symbols = set([s.strip().upper() for s in user_symbols]) | captain_symbols
+    unique_symbols = list(set([s.strip().upper() for s in user_symbols]) | captain_symbols)
     
-    # 3. Create Mapping: Internal Symbol -> Yahoo Ticker
-    # This prevents the "zip" bug. We track exactly what to call API with.
+    # Map Internal -> API Symbol
     symbol_map = {}
+    api_tickers_list = []
+    
     for sym in unique_symbols:
-        if sym.endswith(".NS"):
-            symbol_map[sym] = sym
-        else:
-            symbol_map[sym] = f"{sym}.NS"
+        api_sym = sym if sym.endswith(".NS") or sym == "^NSEI" else f"{sym}.NS"
+        symbol_map[api_sym] = sym
+        api_tickers_list.append(api_sym)
             
-    # 4. Batch Fetch
-    api_tickers = list(symbol_map.values())
-    print(f"🔌 Connecting to API for {len(api_tickers)} symbols...")
-    
-    # Use yfinance Tickers object
-    tickers = yf.Tickers(" ".join(api_tickers))
-    
-    # 5. Populate Data Object
+    # Add Nifty for Beta Calculation
+    if "^NSEI" not in api_tickers_list:
+        api_tickers_list.append("^NSEI")
+        symbol_map["^NSEI"] = "^NSEI"
+
+    # Initialize Container
     data = MarketData()
+    print(f"🔌 Connecting for {len(api_tickers_list)} symbols...")
     
-    for internal_sym, api_sym in symbol_map.items():
+    tickers = yf.Tickers(" ".join(api_tickers_list))
+
+    # --- 2. BULK HISTORY FETCH (Risk Engine Data) ---
+    try:
+        print("   ↳ Fetching Price History...")
+        history_bulk = tickers.history(period="1y", group_by='ticker')
+        
+        for api_sym in api_tickers_list:
+            internal_sym = symbol_map.get(api_sym)
+            if not internal_sym: continue
+            
+            try:
+                # Handle Single Ticker vs Multi-Ticker return structure
+                if len(api_tickers_list) == 1:
+                    df_hist = history_bulk
+                else:
+                    df_hist = history_bulk.xs(api_sym, level=0, axis=1)
+                
+                if not df_hist.empty:
+                    data.price_history[internal_sym] = df_hist
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"   ⚠️ History fetch warning: {e}")
+
+    # --- 3. DETAILED FUNDAMENTALS (Valuation/Thesis Data) ---
+    print("   ↳ Fetching Deep Fundamentals (This may take a moment)...")
+    
+    for api_sym in api_tickers_list:
+        internal_sym = symbol_map.get(api_sym)
+        if not internal_sym: continue
+        
         try:
-            # Access the specific ticker object
             ticker = tickers.tickers[api_sym]
             
-            # --- Fast Data (Metadata) ---
-            # info usually triggers a request. If it fails, whole ticker is likely invalid.
+            # A. METADATA (CRITICAL RESTORATION)
+            # We MUST fetch .info to get trailingPE, beta, returnOnEquity
             try:
-                data.info[internal_sym] = ticker.info
+                full_info = ticker.info
+                # Fallback to fast_info for live price if info fails
+                if not full_info:
+                    fi = ticker.fast_info
+                    full_info = {
+                        "previousClose": fi.previous_close,
+                        "marketCap": fi.market_cap,
+                        "currency": fi.currency
+                    }
+                data.info[internal_sym] = full_info
             except Exception:
-                # If info fetch fails, skip this ticker
-                print(f"⚠️ Info fetch failed for {internal_sym}")
-                continue
-            
-            # --- Heavy Data (Financials) ---
-            # Wrap individually so one failure doesn't break the rest
+                data.info[internal_sym] = {}
+
+            # B. FINANCIALS (Thesis Engine)
+            # Fetching individually is safer for stability
             try:
                 data.financials[internal_sym] = ticker.financials
-            except Exception:
+            except:
                 data.financials[internal_sym] = None
-            
+
             try:
                 data.balance_sheet[internal_sym] = ticker.balance_sheet
-            except Exception:
+            except:
                 data.balance_sheet[internal_sym] = None
-
-            # --- News ---
+                
+            # C. NEWS
             try:
                 data.news[internal_sym] = ticker.news
-            except Exception:
+            except:
                 data.news[internal_sym] = []
-            
+
         except Exception as e:
-            print(f"⚠️ Critical fetch error for {internal_sym}: {e}")
+            print(f"❌ Error processing {internal_sym}: {str(e)}")
             
     return data

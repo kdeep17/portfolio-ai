@@ -1,63 +1,88 @@
 from datetime import datetime, timedelta, timezone
 import re
+from difflib import SequenceMatcher
 
-# Constants
+# --- CONFIGURATION ---
 RECENT_DAYS = 30 
-MAX_DISPLAY = 3
+MAX_DISPLAY_PER_STOCK = 3
+DEDUPLICATION_THRESHOLD = 0.6  # 60% similarity means it's a duplicate
 
-# --- 1. PRECISE PHRASE MATCHING (Higher Priority) ---
-# We check these first. They override single keywords.
-CRITICAL_PHRASES = {
-    # NEGATIVE PHRASES
-    "profit fall": -10, "profit drop": -10, "profit decline": -10, "net loss": -10,
-    "revenue miss": -8, "sales miss": -8, "margin pressure": -8, "margin contract": -8,
-    "downgrade": -8, "target cut": -5, "sell rating": -8,
-    "high cost": -5, "softer demand": -5, "weak demand": -5,
-    "regulatory action": -10, "show cause": -10, "ban": -10,
+# --- 1. SOPHISTICATED PATTERN MATCHING ---
+# Tuples: (Regex Pattern, Score, Category)
+# Regex allows for boundary checks (\b) to avoid partial matches
+
+PATTERNS = [
+    # --- CRITICAL GOVERNANCE (highest priority) ---
+    (r"\b(fraud|investigation|raid|sebi|ed probe|show cause)\b", -15, "Governance Risk"),
+    (r"\b(resigns|quits|steps down)\b", -10, "Management Change"),
+    (r"\b(ban|regulatory action|penalty)\b", -12, "Regulatory Hit"),
+
+    # --- EARNINGS: THE NUANCE LAYER ---
+    # Positive Nuances
+    (r"\b(loss narrows|narrowed loss|turns profitable|back in black)\b", 10, "Turnaround"),
+    (r"\b(profit jumps|profit surges|doubles profit|record profit)\b", 10, "Earnings Blowout"),
+    (r"\b(beats estimates|beat estimates)\b", 8, "Earnings Beat"),
     
-    # POSITIVE PHRASES
-    "record profit": 10, "profit jump": 10, "profit surge": 10, "net profit up": 10,
-    "revenue beat": 8, "sales beat": 8, "margin expand": 8,
-    "upgrade": 8, "target raise": 5, "buy rating": 8,
-    "order win": 8, "new contract": 8, "acquisition": 5, "bonus issue": 5
-}
+    # Negative Nuances
+    (r"\b(loss widens|widened loss|slips into loss)\b", -10, "Deterioration"),
+    (r"\b(profit falls|profit drops|profit declines|net profit down)\b", -10, "Earnings Miss"),
+    (r"\b(misses estimates|miss estimates)\b", -8, "Earnings Miss"),
+    (r"\b(margin pressure|margins contract)\b", -7, "Operational Stress"),
 
-# --- 2. SINGLE KEYWORD FALLBACKS (Lower Priority) ---
-# Only used if no specific phrase is found.
-NEGATIVE_KEYWORDS = {
-    "slump", "plunge", "tumble", "crash", "misses", "losses", 
-    "investigation", "fraud", "default", "bankruptcy"
-}
+    # --- STRATEGIC ---
+    (r"\b(order win|bag|bags order|new contract)\b", 6, "Order Book"),
+    (r"\b(acquisition|acquires|buyout)\b", 5, "Expansion"),
+    (r"\b(stake sale|promoter sells)\b", -5, "Insider Selling"),
+    (r"\b(buyback|bonus issue|dividend)\b", 5, "Capital Return"),
 
-POSITIVE_KEYWORDS = {
-    "surge", "rally", "outperform", "bull", "dividend", "buyback"
-}
-
-NOISE_PATTERNS = [
-    r"market live", r"sensex", r"nifty", r"share price", 
-    r"buy or sell", r"target price", r"stock to watch",
-    r"ahead of market", r"opening bell", r"buzzing stocks",
-    r"technical check", r"chart check"
+    # --- ANALYST ACTION ---
+    (r"\b(downgrade|cut target|sell rating)\b", -5, "Analyst Downgrade"),
+    (r"\b(upgrade|raise target|buy rating)\b", 5, "Analyst Upgrade"),
 ]
 
+# --- 2. NOISE PATTERNS ---
+# Headlines that sound important but are usually daily market commentary
+NOISE_PATTERNS = [
+    r"profit booking",  # Often confused with profit fall
+    r"market live", r"sensex", r"nifty", 
+    r"stock to watch", r"buzzing stock", r"hot stock",
+    r"technical check", r"chart check", r"levels to watch",
+    r"opening bell", r"ahead of market"
+]
 
 def _parse_event_date(item) -> datetime | None:
+    """Robust date parser for Yahoo Finance dictionary."""
     content = item.get("content", {})
+    
+    # Try pubDate (ISO format)
     pub = content.get("pubDate")
     if pub:
         try:
             dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
             return dt.astimezone(timezone.utc)
         except: pass
+        
+    # Try providerPublishTime (Timestamp)
     ts = content.get("providerPublishTime")
     if ts:
         try:
             return datetime.fromtimestamp(ts, tz=timezone.utc)
         except: pass
+        
     return None
 
+def is_duplicate(headline, existing_headlines):
+    """Checks if a headline is semantically similar to one we've already processed."""
+    clean_h = headline.lower()
+    for existing in existing_headlines:
+        clean_e = existing.lower()
+        # SequenceMatcher calculates similarity ratio
+        ratio = SequenceMatcher(None, clean_h, clean_e).ratio()
+        if ratio > DEDUPLICATION_THRESHOLD:
+            return True
+    return False
 
-def classify_news_item(headline: str, thesis_status: str) -> dict:
+def analyze_headline(headline: str, thesis_status: str) -> dict:
     text = headline.lower()
     
     # 1. Noise Filter
@@ -65,62 +90,69 @@ def classify_news_item(headline: str, thesis_status: str) -> dict:
         return None 
 
     score = 0
+    categories = set()
     matches = []
 
-    # 2. Phrase Matching (Weighted)
-    for phrase, weight in CRITICAL_PHRASES.items():
-        if phrase in text:
+    # 2. Regex Pattern Scanning
+    for pattern, weight, category in PATTERNS:
+        if re.search(pattern, text):
             score += weight
-            matches.append(phrase)
-
-    # 3. Keyword Matching (Only if score is weak/zero)
-    if score == 0:
-        for word in NEGATIVE_KEYWORDS:
-            if word in text:
-                score -= 5
-                matches.append(word)
-        
-        for word in POSITIVE_KEYWORDS:
-            if word in text:
-                score += 5
-                matches.append(word)
-
-    # 4. Categorization based on Net Score
-    if score <= -8:
-        category = "Material Negative"
-        context = "Fundamental deterioration detected"
-    elif score < 0:
-        category = "Negative Sentiment"
-        context = "Short-term pressure"
-    elif score >= 8:
-        category = "Material Positive"
-        context = "Fundamental catalyst detected"
-    elif score > 0:
-        category = "Positive Sentiment"
-        context = "Momentum tailwind"
-    else:
-        # If neutral, we skip it to reduce noise in the dashboard
-        return None
-
-    # Context Contextualization (Adjust urgency based on Thesis)
-    if score < 0 and thesis_status in ["Weakening", "Broken"]:
-        context = f"CRITICAL: Validates downside ({', '.join(matches)})"
+            categories.add(category)
+            # We don't break; a headline can be "Earnings Miss" AND "Downgrade"
     
+    # 3. Fallback Keyword Scan (If no complex patterns matched)
+    if score == 0:
+        if any(w in text for w in ["plunge", "crash", "tumble", "slump"]):
+            score = -3
+            categories.add("Price Action")
+        elif any(w in text for w in ["surge", "rally", "zoom", "jump"]):
+            score = 3
+            categories.add("Price Action")
+
+    # 4. Construct Verdict
+    if score == 0:
+        return None # Skip neutral news to reduce cognitive load
+        
+    # Determine Primary Category (Prioritize Negative/Governance)
+    if "Governance Risk" in categories: primary_cat = "Governance Risk"
+    elif "Deterioration" in categories: primary_cat = "Fundamental Decay"
+    elif "Earnings Blowout" in categories: primary_cat = "Earnings Blowout"
+    else: primary_cat = list(categories)[0] if categories else "General"
+
+    # 5. Contextual Intelligence
+    # If the stock is already "Weakening", negative news is a confirmation signal.
+    context = ""
+    if score < 0:
+        if thesis_status in ["Weakening", "Broken"]:
+            context = "CONFIRMATION: Validates negative thesis."
+        else:
+            context = "WARNING: Monitor for trend change."
+    elif score > 0:
+        if thesis_status == "Broken":
+            context = "CONTRARIAN: Potential turnaround signal?"
+        else:
+            context = "MOMENTUM: Reinforces growth story."
+
     return {
         "headline": headline,
-        "category": category,
+        "category": primary_cat,
         "impact_score": score,
-        "context": context
+        "confidence_effect": context
     }
 
-
 def run_events_engine(df, thesis_data, market_data):
+    """
+    Premium Events Engine:
+    - Filters Noise (Profit Booking vs Profit Fall)
+    - Deduplicates similar headlines
+    - Nuanced Scoring (Loss Widens vs Loss Narrows)
+    """
     results = []
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)
 
     for _, row in df.iterrows():
         symbol = row["symbol"]
-        if row.get("instrument_type") != "Equity":
+        if row.get("instrument_type", "Equity") != "Equity":
             continue
 
         thesis = thesis_data.get(symbol, {})
@@ -129,27 +161,40 @@ def run_events_engine(df, thesis_data, market_data):
         raw_news = market_data.news.get(symbol, [])
         if not raw_news: continue
 
-        valid_events = []
+        stock_events = []
+        seen_headlines = []
+
         for item in raw_news:
+            # A. Date Check
             date = _parse_event_date(item)
             if not date or date < cutoff_date: continue
 
+            # B. Content Check
             headline = item.get("content", {}).get("title")
             if not headline: continue
-
-            analysis = classify_news_item(headline, current_status)
+            
+            # C. Deduplication
+            if is_duplicate(headline, seen_headlines):
+                continue
+            
+            # D. Analysis
+            analysis = analyze_headline(headline, current_status)
             if analysis:
-                valid_events.append({
+                seen_headlines.append(headline)
+                stock_events.append({
                     "symbol": symbol,
                     "headline": analysis["headline"],
                     "published": date.strftime("%Y-%m-%d"),
-                    "impact": analysis["category"],
-                    "confidence_effect": analysis["context"],
+                    "impact": analysis["category"], # Mapped to UI Badge
+                    "confidence_effect": analysis["confidence_effect"],
                     "score": analysis["impact_score"]
                 })
 
-        # Sort by Absolute Impact (Biggest news first)
-        valid_events.sort(key=lambda x: abs(x["score"]), reverse=True)
-        results.extend(valid_events[:MAX_DISPLAY])
+        # E. Intelligent Sorting
+        # Sort by Severity (Absolute Score) descending
+        stock_events.sort(key=lambda x: abs(x["score"]), reverse=True)
+        
+        # Take top N most impactful events
+        results.extend(stock_events[:MAX_DISPLAY_PER_STOCK])
 
     return results

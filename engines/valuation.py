@@ -1,55 +1,70 @@
 import numpy as np
+import pandas as pd
 from utils.constants import SECTOR_MAP, SECTOR_CAPTAINS, FALLBACK_SECTOR_PE
 
 def run_valuation_engine(df, market_data):
     """
     Computes valuation stretch using Dynamic Sector Benchmarking.
-    
-    Logic:
-    1. Compares stock against 'Sector Captains' (Market Leaders) first.
-    2. If Captains data is missing, falls back to hardcoded Sector Baselines.
-    3. Applies 'Growth Defense': High P/E is forgiven if PEG Ratio is low (<1.5).
-    4. Distinguishes Financials (P/B focus) from non-Financials (P/E focus).
+    OPTIMIZED: Pre-calculates sector benchmarks to avoid redundant lookups.
     """
 
     valuation_output = {}
 
-    # --- HELPER: Get Dynamic Sector Benchmark ---
-    def get_sector_benchmark(sector_name, metric_type="pe"):
-        """
-        Returns (benchmark_value, source_string)
-        metric_type: 'pe' or 'pb'
-        """
-        captains = SECTOR_CAPTAINS.get(sector_name, [])
-        captain_values = []
-        
-        # 1. Try fetching live data from Captains
+    # --- PHASE 1: PRE-CALCULATE SECTOR BENCHMARKS ---
+    # Identify all unique sectors in the user's portfolio first
+    unique_sectors = set()
+    for sym in df["symbol"]:
+        unique_sectors.add(SECTOR_MAP.get(sym, "Unknown"))
+
+    # Cache benchmarks for these sectors to avoid re-calculating inside the main loop
+    sector_benchmarks_cache = {}
+
+    for sector in unique_sectors:
+        # 1. Identify Captains
+        captains = SECTOR_CAPTAINS.get(sector, [])
+        pe_values = []
+        pb_values = []
+
+        # 2. Fetch Captain Data (Once per sector)
         for cap_symbol in captains:
-            # Handle potential suffix mismatch (e.g., 'TCS' vs 'TCS.NS')
-            # We check both to be safe, preferring the exact match in market_data
+            # Handle suffix safety (try both raw and .NS)
             info = market_data.get_info(cap_symbol)
             if not info:
-                # Try appending .NS if missing
+                # Fallback to appending .NS if the raw symbol didn't return info
                 info = market_data.get_info(f"{cap_symbol}.NS")
             
             if info:
-                val = info.get("trailingPE") if metric_type == "pe" else info.get("priceToBook")
-                if val is not None and val > 0: # Filter out invalid/negative benchmarks
-                    captain_values.append(val)
+                pe = info.get("trailingPE")
+                pb = info.get("priceToBook")
+                # Filter out None and negative values (unprofitable companies shouldn't set the PE bar)
+                if pe and pe > 0: pe_values.append(pe)
+                if pb and pb > 0: pb_values.append(pb)
         
-        # 2. If we have live captains, use their median
-        if len(captain_values) > 0:
-            return np.median(captain_values), "Live Sector Captains"
-
-        # 3. Fallback to Hardcoded Baseline (Safety Net)
-        # Note: We currently only have P/E fallbacks. For P/B, we assume a standard 3.0x fallback if needed.
-        if metric_type == "pe":
-            return FALLBACK_SECTOR_PE.get(sector_name, 20.0), "Static Market Baseline"
+        # 3. Compute Medians or Fallbacks
+        # PE Benchmark Calculation
+        if pe_values:
+            bench_pe = np.median(pe_values)
+            source_pe = "Live Sector Captains"
         else:
-            return 3.0, "Static Market Baseline" # Default P/B fallback for financials
+            bench_pe = FALLBACK_SECTOR_PE.get(sector, 20.0)
+            source_pe = "Static Market Baseline"
 
+        # PB Benchmark Calculation (Default fallback 3.0 if no captains)
+        if pb_values:
+            bench_pb = np.median(pb_values)
+            source_pb = "Live Sector Captains"
+        else:
+            bench_pb = 3.0
+            source_pb = "Static Market Baseline"
 
-    # --- MAIN EVALUATION LOOP ---
+        sector_benchmarks_cache[sector] = {
+            "pe": (bench_pe, source_pe),
+            "pb": (bench_pb, source_pb)
+        }
+
+    # --- PHASE 2: EVALUATE HOLDINGS ---
+    # Now we iterate through the portfolio. Since benchmarks are cached, this is fast.
+    
     for _, row in df.iterrows():
         symbol = row["symbol"]
         
@@ -77,16 +92,15 @@ def run_valuation_engine(df, market_data):
         if is_financial:
             primary_val = pb
             metric_name = "P/B"
-            metric_key = "pb"
+            # Retrieve cached benchmark
+            benchmark_val, benchmark_source = sector_benchmarks_cache.get(sector, {}).get("pb", (3.0, "Fallback"))
         else:
             primary_val = pe
             metric_name = "P/E"
-            metric_key = "pe"
+            # Retrieve cached benchmark
+            benchmark_val, benchmark_source = sector_benchmarks_cache.get(sector, {}).get("pe", (20.0, "Fallback"))
 
-        # 4. Get Benchmark
-        benchmark_val, benchmark_source = get_sector_benchmark(sector, metric_key)
-
-        # 5. Logic Gates
+        # 4. Logic Gates
         status = "Unknown"
         stress_score = 50
         reason = ""
@@ -138,7 +152,7 @@ def run_valuation_engine(df, market_data):
                         stress_score = 65
                         reason = f"Trading at premium to peers"
 
-        # 6. Final Output Construction
+        # 5. Final Output Construction
         valuation_output[symbol] = {
             "valuation_status": status,
             "stress_score": stress_score,
